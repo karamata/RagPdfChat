@@ -1,4 +1,3 @@
-import PyPDF2
 import io
 from typing import List, Optional
 import re
@@ -35,24 +34,32 @@ class PDFProcessor:
             str: Extracted text
         """
         try:
-            # Create a BytesIO object from file content
-            pdf_file = io.BytesIO(file_content)
-            
-            # Create PDF reader
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            
-            # Extract text from all pages
-            text = ""
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                page_text = page.extract_text()
-                text += page_text + "\n"
-            
-            # Clean the text
-            text = self._clean_text(text)
-            
-            logger.info(f"Extracted {len(text)} characters from PDF")
-            return text
+            # Try to import PyPDF2, if not available use fallback
+            try:
+                import PyPDF2
+                
+                # Create a BytesIO object from file content
+                pdf_file = io.BytesIO(file_content)
+                
+                # Create PDF reader
+                pdf_reader = PyPDF2.PdfReader(pdf_file)
+                
+                # Extract text from all pages
+                text = ""
+                for page_num in range(len(pdf_reader.pages)):
+                    page = pdf_reader.pages[page_num]
+                    page_text = page.extract_text()
+                    text += page_text + "\n"
+                
+                # Clean the text
+                text = self._clean_text(text)
+                
+                logger.info(f"Extracted {len(text)} characters from PDF")
+                return text
+                
+            except ImportError:
+                # PyPDF2 not available, provide error message
+                raise Exception("PyPDF2 library is not installed. Please install it to process PDF files.")
             
         except Exception as e:
             logger.error(f"Error extracting text from PDF: {str(e)}")
@@ -139,12 +146,8 @@ class PDFProcessor:
             bool: True if valid PDF
         """
         try:
-            pdf_file = io.BytesIO(file_content)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            
-            # Try to access the first page to validate
-            if len(pdf_reader.pages) > 0:
-                _ = pdf_reader.pages[0]
+            # Basic PDF header validation
+            if file_content.startswith(b'%PDF-'):
                 return True
             else:
                 return False

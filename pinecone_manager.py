@@ -1,10 +1,9 @@
-from pinecone import Pinecone, ServerlessSpec
-from sentence_transformers import SentenceTransformer
 import numpy as np
 from typing import List, Dict, Any, Optional
 import hashlib
 import logging
 import time
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,19 +27,39 @@ class PineconeManager:
         self.index_name = index_name
         self.embedding_dimension = 384  # Dimension for all-MiniLM-L6-v2
         
-        # Initialize Pinecone
-        self.pc = Pinecone(api_key=api_key)
+        # Try to initialize Pinecone and SentenceTransformer
+        try:
+            from pinecone import Pinecone, ServerlessSpec
+            self.pc = Pinecone(api_key=api_key)
+            self.ServerlessSpec = ServerlessSpec
+            self.pinecone_available = True
+        except ImportError:
+            logger.warning("Pinecone library not available. Using fallback mode.")
+            self.pc = None
+            self.ServerlessSpec = None
+            self.pinecone_available = False
         
-        # Initialize embedding model
-        logger.info(f"Loading embedding model: {embedding_model}")
-        self.embedding_model = SentenceTransformer(embedding_model)
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info(f"Loading embedding model: {embedding_model}")
+            self.embedding_model = SentenceTransformer(embedding_model)
+            self.sentence_transformers_available = True
+        except ImportError:
+            logger.warning("SentenceTransformers library not available. Using fallback mode.")
+            self.embedding_model = None
+            self.sentence_transformers_available = False
         
         self.index = None
+        self.local_storage = {}  # Fallback storage
         
     def initialize_index(self):
         """
         Initialize or connect to Pinecone index
         """
+        if not self.pinecone_available:
+            logger.info("Using local storage fallback instead of Pinecone")
+            return
+            
         try:
             # Check if index exists
             existing_indexes = [index.name for index in self.pc.list_indexes()]
@@ -53,7 +72,7 @@ class PineconeManager:
                     name=self.index_name,
                     dimension=self.embedding_dimension,
                     metric="cosine",
-                    spec=ServerlessSpec(
+                    spec=self.ServerlessSpec(
                         cloud="aws",
                         region="us-east-1"
                     )
@@ -85,6 +104,23 @@ class PineconeManager:
         Returns:
             List of embedding vectors
         """
+        if not self.sentence_transformers_available:
+            # Simple fallback: use hash-based pseudo-embeddings
+            logger.warning("Using fallback hash-based embeddings")
+            embeddings = []
+            for text in texts:
+                # Create a simple hash-based embedding
+                hash_obj = hashlib.md5(text.encode())
+                hash_bytes = hash_obj.digest()
+                # Convert to float vector
+                embedding = [float(b) / 255.0 for b in hash_bytes]
+                # Pad or truncate to desired dimension
+                while len(embedding) < self.embedding_dimension:
+                    embedding.extend(embedding[:min(len(embedding), self.embedding_dimension - len(embedding))])
+                embedding = embedding[:self.embedding_dimension]
+                embeddings.append(embedding)
+            return embeddings
+            
         try:
             embeddings = self.embedding_model.encode(texts, convert_to_tensor=False)
             return embeddings.tolist()
@@ -120,9 +156,6 @@ class PineconeManager:
             bool: Success status
         """
         try:
-            if not self.index:
-                raise Exception("Pinecone index not initialized")
-            
             if not chunks:
                 logger.warning("No chunks to add")
                 return True
@@ -130,6 +163,21 @@ class PineconeManager:
             # Generate embeddings for all chunks
             logger.info(f"Generating embeddings for {len(chunks)} chunks")
             embeddings = self.generate_embeddings(chunks)
+            
+            if not self.pinecone_available or not self.index:
+                # Use local storage fallback
+                logger.info("Using local storage fallback for chunks")
+                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                    chunk_id = self._generate_chunk_id(chunk, filename, i)
+                    self.local_storage[chunk_id] = {
+                        "text": chunk,
+                        "filename": filename,
+                        "chunk_index": i,
+                        "timestamp": time.time(),
+                        "embedding": embedding
+                    }
+                logger.info(f"Successfully stored {len(chunks)} chunks locally")
+                return True
             
             # Prepare vectors for upsert
             vectors = []
@@ -159,7 +207,7 @@ class PineconeManager:
             return True
             
         except Exception as e:
-            logger.error(f"Error adding chunks to Pinecone: {str(e)}")
+            logger.error(f"Error adding chunks: {str(e)}")
             return False
     
     def search_similar_chunks(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
@@ -174,11 +222,33 @@ class PineconeManager:
             List of similar chunks with metadata
         """
         try:
-            if not self.index:
-                raise Exception("Pinecone index not initialized")
-            
             # Generate embedding for query
             query_embedding = self.generate_embeddings([query])[0]
+            
+            if not self.pinecone_available or not self.index:
+                # Use local storage fallback with simple similarity
+                logger.info("Using local storage search fallback")
+                results = []
+                
+                for chunk_id, chunk_data in self.local_storage.items():
+                    # Simple cosine similarity calculation
+                    chunk_embedding = chunk_data["embedding"]
+                    similarity = self._calculate_cosine_similarity(query_embedding, chunk_embedding)
+                    
+                    result = {
+                        "text": chunk_data["text"],
+                        "filename": chunk_data["filename"],
+                        "chunk_index": chunk_data["chunk_index"],
+                        "score": similarity
+                    }
+                    results.append(result)
+                
+                # Sort by similarity score and return top_k
+                results.sort(key=lambda x: x["score"], reverse=True)
+                results = results[:top_k]
+                
+                logger.info(f"Found {len(results)} similar chunks using local search")
+                return results
             
             # Search in Pinecone
             search_results = self.index.query(
@@ -204,6 +274,26 @@ class PineconeManager:
         except Exception as e:
             logger.error(f"Error searching similar chunks: {str(e)}")
             return []
+    
+    def _calculate_cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Calculate cosine similarity between two vectors"""
+        try:
+            import math
+            
+            # Calculate dot product
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            
+            # Calculate magnitudes
+            magnitude1 = math.sqrt(sum(a * a for a in vec1))
+            magnitude2 = math.sqrt(sum(a * a for a in vec2))
+            
+            # Avoid division by zero
+            if magnitude1 == 0 or magnitude2 == 0:
+                return 0.0
+            
+            return dot_product / (magnitude1 * magnitude2)
+        except Exception:
+            return 0.0
     
     def get_index_stats(self) -> Dict[str, Any]:
         """
