@@ -107,10 +107,10 @@ def main():
         st.header("📁 Document Upload")
         
         uploaded_files = st.file_uploader(
-            "Upload PDF documents",
-            type=['pdf'],
+            "Upload documents",
+            type=['pdf', 'txt'],
             accept_multiple_files=True,
-            help="Upload one or more PDF files to add to the knowledge base"
+            help="Upload PDF or text files to add to the knowledge base. For best results with PDFs, ensure PyPDF2 is installed."
         )
         
         if uploaded_files:

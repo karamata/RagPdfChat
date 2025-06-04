@@ -23,47 +23,108 @@ class PDFProcessor:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
     
-    def extract_text_from_pdf(self, file_content: bytes) -> str:
+    def extract_text_from_document(self, file_content: bytes, filename: str) -> str:
         """
-        Extract text from PDF file content
+        Extract text from document file content
         
         Args:
-            file_content: PDF file as bytes
+            file_content: Document file as bytes
+            filename: Name of the file
             
         Returns:
             str: Extracted text
         """
         try:
-            # Try to import PyPDF2, if not available use fallback
-            try:
-                import PyPDF2
-                
-                # Create a BytesIO object from file content
-                pdf_file = io.BytesIO(file_content)
-                
-                # Create PDF reader
-                pdf_reader = PyPDF2.PdfReader(pdf_file)
-                
-                # Extract text from all pages
-                text = ""
-                for page_num in range(len(pdf_reader.pages)):
-                    page = pdf_reader.pages[page_num]
-                    page_text = page.extract_text()
-                    text += page_text + "\n"
-                
-                # Clean the text
-                text = self._clean_text(text)
-                
-                logger.info(f"Extracted {len(text)} characters from PDF")
-                return text
-                
-            except ImportError:
-                # PyPDF2 not available, provide error message
-                raise Exception("PyPDF2 library is not installed. Please install it to process PDF files.")
+            # Check file type
+            if filename.lower().endswith('.txt'):
+                # Handle text files
+                try:
+                    text = file_content.decode('utf-8')
+                    logger.info(f"Extracted {len(text)} characters from text file")
+                    return self._clean_text(text)
+                except UnicodeDecodeError:
+                    try:
+                        text = file_content.decode('latin-1')
+                        logger.info(f"Extracted {len(text)} characters from text file (latin-1)")
+                        return self._clean_text(text)
+                    except Exception as e:
+                        logger.error(f"Failed to decode text file: {str(e)}")
+                        raise Exception(f"Failed to decode text file: {str(e)}")
+            
+            elif filename.lower().endswith('.pdf'):
+                # Handle PDF files
+                try:
+                    import PyPDF2
+                    
+                    # Create a BytesIO object from file content
+                    pdf_file = io.BytesIO(file_content)
+                    
+                    # Create PDF reader
+                    pdf_reader = PyPDF2.PdfReader(pdf_file)
+                    
+                    # Extract text from all pages
+                    text = ""
+                    for page_num in range(len(pdf_reader.pages)):
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        text += page_text + "\n"
+                    
+                    # Clean the text
+                    text = self._clean_text(text)
+                    
+                    logger.info(f"Extracted {len(text)} characters from PDF")
+                    return text
+                    
+                except ImportError:
+                    # Basic PDF text extraction fallback
+                    logger.warning("PyPDF2 not available, using basic PDF text extraction")
+                    
+                    # Try to extract basic text patterns from PDF
+                    content_str = file_content.decode('latin-1', errors='ignore')
+                    
+                    # Look for text between stream objects and other text patterns
+                    import re
+                    
+                    # Multiple patterns for different PDF text encodings
+                    patterns = [
+                        r'BT\s*(.*?)\s*ET',  # Text objects
+                        r'\((.*?)\)',        # Text in parentheses
+                        r'<(.*?)>',          # Text in angle brackets
+                    ]
+                    
+                    extracted_text = ""
+                    for pattern in patterns:
+                        matches = re.findall(pattern, content_str, re.DOTALL)
+                        for match in matches:
+                            # Clean up PDF text commands
+                            clean_match = re.sub(r'/\w+\s*', '', match)
+                            clean_match = re.sub(r'Tf\s*', '', clean_match)
+                            clean_match = re.sub(r'Td\s*', ' ', clean_match)
+                            clean_match = re.sub(r'Tj\s*', '', clean_match)
+                            clean_match = re.sub(r'\d+\.?\d*\s*', '', clean_match)
+                            clean_match = re.sub(r'[()<>]', '', clean_match)
+                            if len(clean_match.strip()) > 2:  # Only add meaningful text
+                                extracted_text += clean_match + " "
+                    
+                    if extracted_text.strip():
+                        text = self._clean_text(extracted_text)
+                        logger.info(f"Extracted {len(text)} characters using basic PDF parsing")
+                        return text
+                    else:
+                        raise Exception("Could not extract text from PDF. Please ensure the PDF contains readable text or install PyPDF2 for better extraction.")
+            
+            else:
+                raise Exception(f"Unsupported file type: {filename}")
             
         except Exception as e:
-            logger.error(f"Error extracting text from PDF: {str(e)}")
-            raise Exception(f"Failed to extract text from PDF: {str(e)}")
+            logger.error(f"Error extracting text from document: {str(e)}")
+            raise Exception(f"Failed to extract text from document: {str(e)}")
+    
+    def extract_text_from_pdf(self, file_content: bytes) -> str:
+        """
+        Legacy method for backward compatibility
+        """
+        return self.extract_text_from_document(file_content, "document.pdf")
     
     def _clean_text(self, text: str) -> str:
         """
