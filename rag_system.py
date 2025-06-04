@@ -52,8 +52,8 @@ class RAGSystem:
         try:
             logger.info(f"Processing document: {filename}")
             
-            # Extract text from PDF
-            text = self.pdf_processor.extract_text_from_pdf(file_content)
+            # Extract text from document
+            text = self.pdf_processor.extract_text_from_document(file_content, filename)
             if not text.strip():
                 logger.error(f"No text extracted from {filename}")
                 return False
