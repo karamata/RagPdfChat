@@ -1,0 +1,6 @@
+numpy
+pinecone-client
+pypdf2
+requests
+sentence-transformers
+streamlit
