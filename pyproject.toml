@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "repl-nix-workspace"
 version = "0.1.0"
@@ -5,7 +9,7 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
-    "pinecone-client",
+    "pinecone",
     "pypdf2",
     "requests",
     "sentence-transformers",

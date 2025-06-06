@@ -14,7 +14,7 @@ class PineconeManager:
     Manages Pinecone vector database operations
     """
     
-    def __init__(self, api_key: str, index_name: str, embedding_model: str = "all-MiniLM-L6-v2"):
+    def __init__(self, api_key: str, index_name: str, embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"):
         """
         Initialize Pinecone manager
         
@@ -25,7 +25,7 @@ class PineconeManager:
         """
         self.api_key = api_key
         self.index_name = index_name
-        self.embedding_dimension = 384  # Dimension for all-MiniLM-L6-v2
+        # We'll set embedding_dimension after loading the model to get the actual dimension
         
         # Try to initialize Pinecone and SentenceTransformer
         try:
@@ -41,12 +41,24 @@ class PineconeManager:
         
         try:
             from sentence_transformers import SentenceTransformer
+            import torch
             logger.info(f"Loading embedding model: {embedding_model}")
-            self.embedding_model = SentenceTransformer(embedding_model)
+            device = "cpu"
+            if torch.cuda.is_available():
+                device = "cuda"
+            logger.info(f"Using device for embeddings: {device}")
+            self.embedding_model = SentenceTransformer(embedding_model, device=device)
+            
+            # Get the actual embedding dimension from the model
+            test_embedding = self.embedding_model.encode(["test"])
+            self.embedding_dimension = len(test_embedding[0])
+            logger.info(f"Embedding dimension: {self.embedding_dimension}")
+            
             self.sentence_transformers_available = True
         except ImportError:
             logger.warning("SentenceTransformers library not available. Using fallback mode.")
             self.embedding_model = None
+            self.embedding_dimension = 384  # Default fallback dimension
             self.sentence_transformers_available = False
         
         self.index = None
@@ -65,7 +77,7 @@ class PineconeManager:
             existing_indexes = [index.name for index in self.pc.list_indexes()]
             
             if self.index_name not in existing_indexes:
-                logger.info(f"Creating new Pinecone index: {self.index_name}")
+                logger.info(f"Creating new Pinecone index: {self.index_name} with dimension {self.embedding_dimension}")
                 
                 # Create index
                 self.pc.create_index(
@@ -85,6 +97,37 @@ class PineconeManager:
                     
             else:
                 logger.info(f"Connecting to existing Pinecone index: {self.index_name}")
+                
+                # Check if existing index dimension matches our embedding dimension
+                index_info = self.pc.describe_index(self.index_name)
+                existing_dimension = index_info.dimension
+                
+                if existing_dimension != self.embedding_dimension:
+                    logger.warning(f"Dimension mismatch! Index has {existing_dimension} dimensions but model produces {self.embedding_dimension}")
+                    logger.info("Deleting existing index and creating new one with correct dimensions...")
+                    
+                    # Delete existing index
+                    self.pc.delete_index(self.index_name)
+                    
+                    # Wait a bit for deletion to complete
+                    time.sleep(5)
+                    
+                    # Create new index with correct dimension
+                    logger.info(f"Creating new Pinecone index: {self.index_name} with dimension {self.embedding_dimension}")
+                    self.pc.create_index(
+                        name=self.index_name,
+                        dimension=self.embedding_dimension,
+                        metric="cosine",
+                        spec=self.ServerlessSpec(
+                            cloud="aws",
+                            region="us-east-1"
+                        )
+                    )
+                    
+                    # Wait for index to be ready
+                    while not self.pc.describe_index(self.index_name).status['ready']:
+                        logger.info("Waiting for index to be ready...")
+                        time.sleep(1)
             
             # Connect to index
             self.index = self.pc.Index(self.index_name)
@@ -112,12 +155,15 @@ class PineconeManager:
                 # Create a simple hash-based embedding
                 hash_obj = hashlib.md5(text.encode())
                 hash_bytes = hash_obj.digest()
-                # Convert to float vector
-                embedding = [float(b) / 255.0 for b in hash_bytes]
-                # Pad or truncate to desired dimension
-                while len(embedding) < self.embedding_dimension:
-                    embedding.extend(embedding[:min(len(embedding), self.embedding_dimension - len(embedding))])
-                embedding = embedding[:self.embedding_dimension]
+                # Convert to float vector and normalize
+                base_embedding = [float(b) / 255.0 for b in hash_bytes]
+                
+                # Create embedding with correct dimension
+                embedding = []
+                for i in range(self.embedding_dimension):
+                    # Use modulo to repeat the base pattern
+                    embedding.append(base_embedding[i % len(base_embedding)])
+                
                 embeddings.append(embedding)
             return embeddings
             
@@ -303,14 +349,21 @@ class PineconeManager:
             Dict containing index statistics
         """
         try:
-            if not self.index:
-                return {"error": "Index not initialized"}
+            if not self.pinecone_available or not self.index:
+                # Return local storage stats
+                return {
+                    "total_vectors": len(self.local_storage),
+                    "dimension": self.embedding_dimension,
+                    "index_fullness": 0,
+                    "using_local_storage": True
+                }
             
             stats = self.index.describe_index_stats()
             return {
                 "total_vectors": stats.get('total_vector_count', 0),
-                "dimension": stats.get('dimension', 0),
-                "index_fullness": stats.get('index_fullness', 0)
+                "dimension": stats.get('dimension', self.embedding_dimension),
+                "index_fullness": stats.get('index_fullness', 0),
+                "using_local_storage": False
             }
             
         except Exception as e:
@@ -322,6 +375,12 @@ class PineconeManager:
         Delete the Pinecone index
         """
         try:
+            if not self.pinecone_available:
+                # Clear local storage
+                self.local_storage.clear()
+                logger.info("Cleared local storage")
+                return
+                
             if self.index_name in [index.name for index in self.pc.list_indexes()]:
                 self.pc.delete_index(self.index_name)
                 logger.info(f"Deleted index: {self.index_name}")

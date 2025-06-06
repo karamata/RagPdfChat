@@ -25,7 +25,7 @@ if "rag_system" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 if "pinecone_index_name" not in st.session_state:
-    st.session_state.pinecone_index_name = f"rag-index-{str(uuid.uuid4())[:8]}"
+    st.session_state.pinecone_index_name = "caris-demo"
 
 def initialize_rag_system():
     """Initialize the RAG system with API keys"""
